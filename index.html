@@ -4,10 +4,58 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>نظام الدفع الموحد - لوحة التاجر</title>
-    <!-- مكتبة توليد QR Code -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-    <!-- مكتبة Supabase للربط السحابي -->
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- مكتبة توليد QR Code و Supabase: تحميل من عدة مصادر كنسخة احتياطية (fallback) لتقليل احتمالية الحظر -->
+    <script>
+        // يحاول تحميل سكربت من قائمة روابط بالترتيب حتى ينجح أحدها
+        async function loadScriptFallback(urls) {
+            for (const url of urls) {
+                try {
+                    await new Promise((resolve, reject) => {
+                        const s = document.createElement('script');
+                        s.src = url;
+                        s.async = true;
+                        s.onload = () => resolve();
+                        s.onerror = () => reject(new Error('load error'));
+                        document.head.appendChild(s);
+                    });
+                    console.log('Loaded script:', url);
+                    return url;
+                } catch (e) {
+                    console.warn('Failed to load', url, e);
+                    // try next
+                }
+            }
+            throw new Error('All script URLs failed');
+        }
+
+        // تحميل كل مكتبة من مجموعة روابط احتياطية
+        async function loadDependencies() {
+            // QRCode.js (qrcodejs 1.0.0) from popular CDNs
+            const qrcodeUrls = [
+                'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
+                'https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js',
+                'https://unpkg.com/qrcodejs@1.0.0/qrcode.min.js'
+            ];
+
+            // Supabase JS (build) from multiple CDNs
+            const supabaseUrls = [
+                'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/supabase.min.js',
+                'https://unpkg.com/@supabase/supabase-js@2/dist/supabase.min.js',
+                'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2'
+            ];
+
+            // حاول تحميل المكتبتين بالتوازي (داخلية تحاول تلقائياً البدائل)
+            await Promise.all([
+                (async () => { try { await loadScriptFallback(qrcodeUrls); } catch(e){ console.error('QRCode load failed', e); } })(),
+                (async () => { try { await loadScriptFallback(supabaseUrls); } catch(e){ console.error('Supabase load failed', e); } })()
+            ]);
+        }
+
+        // تحميل الاعتماديات قبل تنفيذ أي كود يعتمد عليها
+        let dependenciesLoaded = false;
+        loadDependencies().then(() => { dependenciesLoaded = true; console.log('Dependencies loaded (or attempted)'); })
+            .catch(e => { console.warn('Dependency loader finished with errors', e); });
+    </script>
     <style>
         :root {
             --primary: #4f46e5;
@@ -195,8 +243,54 @@
         // إعدادات اتصال Supabase
         const SUPABASE_URL = 'https://neouddfxqysjuiidscxp.supabase.co';
         const SUPABASE_KEY = 'Sb_publishable_H1LBZwUHqgU5PSAw6sXAFg_DgefUOph';
-        
-        const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        // دالة انتظار تحميل الاعتماديات قبل استخدامهما
+        async function waitForDeps(timeout = 5000) {
+            const start = Date.now();
+            while (!dependenciesLoaded && (Date.now() - start) < timeout) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            // قد تكون المكتبات محملة أو لا؛ سنحاول كشفها لاحقاً
+        }
+
+        // واجهة بسيطة للتعامل مع Supabase عبر REST عندما لا يتوفر مكتبة العميل
+        const supabaseClientREST = {
+            async upsert(table, payload) {
+                // upsert باستخدام تفضيل merge-duplicates
+                const url = SUPABASE_URL + '/rest/v1/' + table;
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'apikey': SUPABASE_KEY,
+                        'Authorization': 'Bearer ' + SUPABASE_KEY,
+                        'Prefer': 'resolution=merge-duplicates'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error('Supabase REST upsert failed: ' + res.status + ' ' + text);
+                }
+                return await res.json();
+            },
+            async selectSingle(table, id) {
+                const url = SUPABASE_URL + `/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`;
+                const res = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'apikey': SUPABASE_KEY,
+                        'Authorization': 'Bearer ' + SUPABASE_KEY
+                    }
+                });
+                if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error('Supabase REST select failed: ' + res.status + ' ' + text);
+                }
+                const data = await res.json();
+                return data[0] || null;
+            }
+        };
 
         // توليد معرف عشوائي فريد للتاجر
         function generateId() {
@@ -204,6 +298,8 @@
         }
 
         window.addEventListener('DOMContentLoaded', async () => {
+            await waitForDeps(6000);
+
             const urlParams = new URLSearchParams(window.location.search);
             const merchantId = urlParams.get('m');
 
@@ -214,7 +310,7 @@
             } else {
                 // وضع التاجر: فتح لوحة الإعدادات
                 document.getElementById('admin-view').classList.remove('hidden');
-                
+
                 // التحقق هل لديه بيانات محفوظة محلياً أو جلبها
                 let savedId = localStorage.getItem('current_merchant_id');
                 if (savedId) {
@@ -241,7 +337,7 @@
         async function saveMerchantData() {
             const name = document.getElementById('merchantNameInput').value.trim();
             const phone = document.getElementById('merchantPhoneInput').value.trim();
-            
+
             if (!name) {
                 alert('الرجاء إدخال اسم المتجر');
                 return;
@@ -267,18 +363,24 @@
                 localStorage.setItem('current_merchant_id', merchantId);
             }
 
-            // الحفظ في قاعدة بيانات Supabase
-            const { error } = await supabaseClient
-                .from('merchants')
-                .upsert({
-                    id: merchantId,
-                    merchant_name: name,
-                    merchant_phone: phone,
-                    wallets: wallets
-                });
-
-            if (error) {
-                alert('حدث خطأ أثناء الحفظ: ' + error.message);
+            // الحفظ: نحاول استخدام مكتبة Supabase إذا كانت محمّلة، وإلا نستخدم REST البسيط
+            try {
+                if (window.supabase && window.supabase.createClient) {
+                    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+                    const { error } = await supabaseClient
+                        .from('merchants')
+                        .upsert({
+                            id: merchantId,
+                            merchant_name: name,
+                            merchant_phone: phone,
+                            wallets: wallets
+                        });
+                    if (error) throw error;
+                } else {
+                    await supabaseClientREST.upsert('merchants', { id: merchantId, merchant_name: name, merchant_phone: phone, wallets: wallets });
+                }
+            } catch (error) {
+                alert('حدث خطأ أثناء الحفظ: ' + (error.message || error));
                 return;
             }
 
@@ -287,25 +389,37 @@
         }
 
         async function loadMerchantToAdmin(merchantId) {
-            const { data, error } = await supabaseClient
-                .from('merchants')
-                .select('*')
-                .eq('id', merchantId)
-                .single();
+            try {
+                let data = null;
+                if (window.supabase && window.supabase.createClient) {
+                    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+                    const res = await supabaseClient
+                        .from('merchants')
+                        .select('*')
+                        .eq('id', merchantId)
+                        .single();
+                    if (res.data) data = res.data;
+                } else {
+                    data = await supabaseClientREST.selectSingle('merchants', merchantId);
+                }
 
-            if (data) {
-                document.getElementById('merchantNameInput').value = data.merchant_name || '';
-                document.getElementById('merchantPhoneInput').value = data.merchant_phone || '';
-                
-                const container = document.getElementById('walletsList');
-                container.innerHTML = '';
-                if (data.wallets && data.wallets.length > 0) {
-                    data.wallets.forEach(w => addWalletRow(w.type, w.number));
+                if (data) {
+                    document.getElementById('merchantNameInput').value = data.merchant_name || '';
+                    document.getElementById('merchantPhoneInput').value = data.merchant_phone || '';
+
+                    const container = document.getElementById('walletsList');
+                    container.innerHTML = '';
+                    if (data.wallets && data.wallets.length > 0) {
+                        data.wallets.forEach(w => addWalletRow(w.type, w.number));
+                    } else {
+                        addWalletRow();
+                    }
+                    generateQRCode(merchantId);
                 } else {
                     addWalletRow();
                 }
-                generateQRCode(merchantId);
-            } else {
+            } catch (e) {
+                console.error('load to admin failed', e);
                 addWalletRow();
             }
         }
@@ -317,12 +431,21 @@
             qrSection.classList.remove('hidden');
 
             const fullLink = window.location.origin + window.location.pathname + '?m=' + merchantId;
-            
-            new QRCode(qrContainer, {
-                text: fullLink,
-                width: 180,
-                height: 180
-            });
+
+            // إذا مكتبة QRCode متاحة، استخدمها، وإلا اعرض رابطاً نصياً
+            if (window.QRCode) {
+                new QRCode(qrContainer, {
+                    text: fullLink,
+                    width: 180,
+                    height: 180
+                });
+            } else {
+                const a = document.createElement('a');
+                a.href = fullLink;
+                a.innerText = fullLink;
+                a.style.wordBreak = 'break-all';
+                qrContainer.appendChild(a);
+            }
         }
 
         function copyCustomerLink() {
@@ -333,40 +456,53 @@
         }
 
         async function loadMerchantForCustomer(merchantId) {
-            const { data, error } = await supabaseClient
-                .from('merchants')
-                .select('*')
-                .eq('id', merchantId)
-                .single();
+            try {
+                let data = null;
+                if (window.supabase && window.supabase.createClient) {
+                    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+                    const res = await supabaseClient
+                        .from('merchants')
+                        .select('*')
+                        .eq('id', merchantId)
+                        .single();
+                    data = res.data;
+                } else {
+                    data = await supabaseClientREST.selectSingle('merchants', merchantId);
+                }
 
-            document.getElementById('loading-view').classList.add('hidden');
+                document.getElementById('loading-view').classList.add('hidden');
 
-            if (error || !data) {
-                document.body.innerHTML = '<div style="text-align:center; padding:50px; font-family:sans-serif;"><h2>عذراً، لم يتم العثور على بيانات هذا التاجر</h2><p>يرجى التحقق من الرابط</p></div>';
-                return;
-            }
+                if (!data) {
+                    document.body.innerHTML = '<div style="text-align:center; padding:50px; font-family:sans-serif;"><h2>عذراً، لم يتم العثور على بيانات هذا التاجر</h2></div>';
+                    return;
+                }
 
-            document.getElementById('customer-view').classList.remove('hidden');
-            document.getElementById('custMerchantName').innerText = data.merchant_name;
+                document.getElementById('customer-view').classList.remove('hidden');
+                document.getElementById('custMerchantName').innerText = data.merchant_name;
 
-            const container = document.getElementById('custWalletsContainer');
-            container.innerHTML = '';
+                const container = document.getElementById('custWalletsContainer');
+                container.innerHTML = '';
 
-            if (data.wallets && data.wallets.length > 0) {
-                data.wallets.forEach(w => {
-                    const card = document.createElement('div');
-                    card.className = 'wallet-card';
-                    card.innerHTML = `
-                        <div>
-                            <strong>${w.type}</strong><br>
-                            <span dir="ltr" style="font-size: 18px; font-weight: bold; color: var(--primary);">${w.number}</span>
-                        </div>
-                        <button style="width: auto; padding: 8px 16px;" onclick="navigator.clipboard.writeText('${w.number}'); alert('تم نسخ الرقم: ${w.number}');">نسخ الرقم</button>
-                    `;
-                    container.appendChild(card);
-                });
-            } else {
-                container.innerHTML = '<p style="text-align: center; color: var(--text-muted);">لا توجد محافظ مضافة حالياً.</p>';
+                if (data.wallets && data.wallets.length > 0) {
+                    data.wallets.forEach(w => {
+                        const card = document.createElement('div');
+                        card.className = 'wallet-card';
+                        card.innerHTML = `
+                            <div>
+                                <strong>${w.type}</strong><br>
+                                <span dir="ltr" style="font-size: 18px; font-weight: bold; color: var(--primary);">${w.number}</span>
+                            </div>
+                            <button style="width: auto; padding: 8px 16px;" onclick="navigator.clipboard.writeText('${w.number}'); alert('تم نسخ الرقم: ${w.number}');">نسخ الرقم</button>
+                        `;
+                        container.appendChild(card);
+                    });
+                } else {
+                    container.innerHTML = '<p style="text-align: center; color: var(--text-muted);">لا توجد محافظ مضافة حالياً.</p>';
+                }
+            } catch (e) {
+                console.error('load for customer failed', e);
+                document.getElementById('loading-view').classList.add('hidden');
+                document.body.innerHTML = '<div style="text-align:center; padding:50px; font-family:sans-serif;"><h2>عذراً، حدث خطأ أثناء جلب بيانات التاجر</h2></div>';
             }
         }
     </script>
