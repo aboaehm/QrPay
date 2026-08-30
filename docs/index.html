@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نظام الدفع الموحد - لوحة التاجر</title>
+
+    <!-- تحميل الملفات المحلية من docs/vendor (GitHub Pages) -->
+    <script src="vendor/supabase.min.js"></script>
+    <script src="vendor/qrcode.min.js"></script>
+
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --border: #cbd5e1;
+            --radius: 12px;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 480px;
+            background: var(--card-bg);
+            padding: 24px;
+            border-radius: var(--radius);
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+        }
+
+        h2, h3 { margin-top: 0; text-align: center; color: var(--primary); }
+        .form-group { margin-bottom: 16px; }
+        label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 14px; }
+        input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 16px; box-sizing: border-box; outline: none; transition: border-color 0.2s; }
+        input:focus { border-color: var(--primary); }
+        .wallet-row { display: flex; gap: 8px; margin-bottom: 8px; }
+        button { background-color: var(--primary); color: white; border: none; padding: 12px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; width: 100%; transition: background-color 0.2s; }
+        button:hover { background-color: var(--primary-hover); }
+        .btn-secondary { background-color: #64748b; margin-top: 8px; }
+        .btn-secondary:hover { background-color: #475569; }
+        .btn-danger { background-color: #ef4444; width: auto; padding: 6px 12px; font-size: 14px; }
+        .btn-danger:hover { background-color: #dc2626; }
+        #qr-container { display: flex; justify-content: center; margin: 20px 0; }
+        #qr-container canvas, #qr-container img { border-radius: 8px; padding: 8px; background: white; border: 1px solid var(--border); }
+        .wallet-card { background: #f1f5f9; padding: 12px; border-radius: 8px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .hidden { display: none !important; }
+        .loading { text-align: center; font-size: 18px; color: var(--text-muted); padding: 20px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div id="loading-view" class="loading hidden">جاري التحميل...</div>
+
+        <div id="admin-view" class="hidden">
+            <h2>لوحة إعدادات التاجر</h2>
+            <div class="form-group">
+                <label>اسم المتجر / التاجر</label>
+                <input type="text" id="merchantNameInput" placeholder="مثال: متجر السعيد">
+            </div>
+            <div class="form-group">
+                <label>رقم الهاتف الأساسي</label>
+                <input type="text" id="merchantPhoneInput" placeholder="777000000">
+            </div>
+
+            <div class="form-group">
+                <label>المحافظ والأرقام</label>
+                <div id="walletsList"></div>
+                <button type="button" class="btn-secondary" onclick="addWalletRow()">+ إضافة محفظة أخرى</button>
+            </div>
+
+            <button onclick="saveMerchantData()">حفظ وتوليد الـ QR</button>
+
+            <div id="qr-section" class="hidden" style="margin-top: 20px;">
+                <h3>رمز الـ QR الخاص بك</h3>
+                <div id="qr-container"></div>
+                <p style="text-align: center; font-size: 13px; color: var(--text-muted);">امسح الرمز أو انسخ رابط صفحتك للزبائن</p>
+                <button class="btn-secondary" onclick="copyCustomerLink()">نسخ رابط صفحة الدفع</button>
+            </div>
+        </div>
+
+        <div id="customer-view" class="hidden">
+            <h2 id="custMerchantName">اسم المتجر</h2>
+            <p style="text-align: center; color: var(--text-muted); margin-bottom: 20px;">اختر المحفظة للدفع مباشرة</p>
+            <div id="custWalletsContainer"></div>
+        </div>
+    </div>
+
+    <script>
+        const SUPABASE_URL = 'https://neouddfxqysjuiidscxp.supabase.co';
+        const SUPABASE_KEY = 'Sb_publishable_H1LBZwUHqgU5PSAw6sXAFg_DgefUOph';
+
+        // generate id
+        function generateId() { return 'M' + Math.random().toString(36).substring(2, 8).toUpperCase(); }
+
+        // wait for local vendors to be ready
+        async function waitForVendor(timeout = 5000) {
+            const start = Date.now();
+            while (typeof QRCode === 'undefined' && typeof window.supabase === 'undefined' && (Date.now() - start) < timeout) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+        }
+
+        // REST fallback for Supabase (if client shim not available)
+        const supabaseClientREST = {
+            async upsert(table, payload) {
+                const url = SUPABASE_URL + '/rest/v1/' + table;
+                const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Prefer': 'resolution=merge-duplicates' }, body: JSON.stringify(payload) });
+                if (!res.ok) { const t = await res.text(); throw new Error('Supabase REST upsert failed: ' + res.status + ' ' + t); }
+                return await res.json();
+            },
+            async selectSingle(table, id) {
+                const url = SUPABASE_URL + `/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`;
+                const res = await fetch(url, { method: 'GET', headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY } });
+                if (!res.ok) { const t = await res.text(); throw new Error('Supabase REST select failed: ' + res.status + ' ' + t); }
+                const data = await res.json();
+                return data[0] || null;
+            }
+        };
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            await waitForVendor(6000);
+            const urlParams = new URLSearchParams(window.location.search);
+            const merchantId = urlParams.get('m');
+            if (merchantId) { document.getElementById('loading-view').classList.remove('hidden'); await loadMerchantForCustomer(merchantId); }
+            else { document.getElementById('admin-view').classList.remove('hidden'); let savedId = localStorage.getItem('current_merchant_id'); if (savedId) await loadMerchantToAdmin(savedId); else { addWalletRow('يمن والت',''); addWalletRow('كاش',''); } }
+        });
+
+        function addWalletRow(type = '', number = '') { const container = document.getElementById('walletsList'); const row = document.createElement('div'); row.className = 'wallet-row'; row.innerHTML = `<input type="text" placeholder="اسم المحفظة (مثل: جوالي، كاش)" value="${type}" class="w-type" style="flex: 1;"><input type="text" placeholder="رقم الحساب" value="${number}" class="w-num" style="flex: 1;"><button type="button" class="btn-danger" onclick="this.parentElement.remove()">حذف</button>`; container.appendChild(row); }
+
+        async function saveMerchantData() {
+            const name = document.getElementById('merchantNameInput').value.trim();
+            const phone = document.getElementById('merchantPhoneInput').value.trim();
+            if (!name) { alert('الرجاء إدخال اسم المتجر'); return; }
+            let wallets = []; document.querySelectorAll('.wallet-row').forEach(row => { const type = row.querySelector('.w-type').value.trim(); const number = row.querySelector('.w-num').value.trim(); if (type && number) wallets.push({ type, number }); });
+            if (wallets.length === 0) { alert('الرجاء إضافة محفظة واحدة على الأقل برقمها الصحيح'); return; }
+            let merchantId = localStorage.getItem('current_merchant_id'); if (!merchantId) { merchantId = generateId(); localStorage.setItem('current_merchant_id', merchantId); }
+
+            try {
+                if (window.supabase && window.supabase.createClient) {
+                    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+                    const { error } = await supabaseClient.from('merchants').upsert({ id: merchantId, merchant_name: name, merchant_phone: phone, wallets: wallets });
+                    if (error) throw error;
+                } else {
+                    await supabaseClientREST.upsert('merchants', { id: merchantId, merchant_name: name, merchant_phone: phone, wallets: wallets });
+                }
+            } catch (error) { alert('حدث خطأ أثناء الحفظ: ' + (error.message || error)); return; }
+
+            alert('تم الحفظ بنجاح!'); generateQRCode(merchantId);
+        }
+
+        async function loadMerchantToAdmin(merchantId) {
+            try {
+                let data = null;
+                if (window.supabase && window.supabase.createClient) { const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY); const res = await supabaseClient.from('merchants').select('*').eq('id', merchantId).single(); if (res.data) data = res.data; }
+                else { data = await supabaseClientREST.selectSingle('merchants', merchantId); }
+                if (data) {
+                    document.getElementById('merchantNameInput').value = data.merchant_name || '';
+                    document.getElementById('merchantPhoneInput').value = data.merchant_phone || '';
+                    const container = document.getElementById('walletsList'); container.innerHTML = ''; if (data.wallets && data.wallets.length > 0) data.wallets.forEach(w => addWalletRow(w.type, w.number)); else addWalletRow(); generateQRCode(merchantId);
+                } else addWalletRow();
+            } catch (e) { console.error('load to admin failed', e); addWalletRow(); }
+        }
+
+        function generateQRCode(merchantId) {
+            const qrSection = document.getElementById('qr-section'); const qrContainer = document.getElementById('qr-container'); qrContainer.innerHTML = ''; qrSection.classList.remove('hidden'); const fullLink = window.location.origin + window.location.pathname + '?m=' + merchantId; if (window.QRCode) new QRCode(qrContainer, { text: fullLink, width: 180, height: 180 }); else { const a = document.createElement('a'); a.href = fullLink; a.innerText = fullLink; a.style.wordBreak = 'break-all'; qrContainer.appendChild(a); }
+        }
+
+        function copyCustomerLink() { const merchantId = localStorage.getItem('current_merchant_id'); const fullLink = window.location.origin + window.location.pathname + '?m=' + merchantId; navigator.clipboard.writeText(fullLink); alert('تم نسخ رابط صفحة الدفع بنجاح!'); }
+
+        async function loadMerchantForCustomer(merchantId) {
+            try {
+                let data = null;
+                if (window.supabase && window.supabase.createClient) { const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY); const res = await supabaseClient.from('merchants').select('*').eq('id', merchantId).single(); data = res.data; }
+                else { data = await supabaseClientREST.selectSingle('merchants', merchantId); }
+                document.getElementById('loading-view').classList.add('hidden'); if (!data) { document.body.innerHTML = '<div style="text-align:center; padding:50px; font-family:sans-serif;"><h2>عذراً، لم يتم العثور على بيانات هذا التاجر</h2></div>'; return; }
+                document.getElementById('customer-view').classList.remove('hidden'); document.getElementById('custMerchantName').innerText = data.merchant_name; const container = document.getElementById('custWalletsContainer'); container.innerHTML = '';
+                if (data.wallets && data.wallets.length > 0) { data.wallets.forEach(w => { const card = document.createElement('div'); card.className = 'wallet-card'; card.innerHTML = `<div><strong>${w.type}</strong><br><span dir="ltr" style="font-size: 18px; font-weight: bold; color: var(--primary);">${w.number}</span></div><button style="width: auto; padding: 8px 16px;" onclick="navigator.clipboard.writeText('${w.number}'); alert('تم نسخ الرقم: ${w.number}');">نسخ الرقم</button>`; container.appendChild(card); }); }
+                else container.innerHTML = '<p style="text-align: center; color: var(--text-muted);">لا توجد محافظ مضافة حالياً.</p>';
+            } catch (e) { console.error('load for customer failed', e); document.getElementById('loading-view').classList.add('hidden'); document.body.innerHTML = '<div style="text-align:center; padding:50px; font-family:sans-serif;"><h2>عذراً، حدث خطأ أثناء جلب بيانات التاجر</h2></div>'; }
+        }
+    </script>
+</body>
+</html>
