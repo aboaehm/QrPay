@@ -4,12 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>نظام الدفع الموحد - لوحة التاجر</title>
+    <!-- تحميل ملفات محلية vendor أولاً لتفادي حجب CDN -->
+    <script src="vendor/supabase.local.js"></script>
+    <script src="vendor/qrcode.local.js"></script>
+
     <!-- مكتبة توليد QR Code و Supabase: تحميل من عدة مصادر كنسخة احتياطية (fallback) لتقليل احتمالية الحظر -->
     <script>
         // يحاول تحميل سكربت من قائمة روابط بالترتيب حتى ينجح أحدها
         async function loadScriptFallback(urls) {
             for (const url of urls) {
                 try {
+                    // إذا كانت URL محلية نسبية ستكون محملة بالفعل بواسطة الوسوم أعلاه، لكن تحتفظ بالدعم
+                    if (document.querySelector('script[src="' + url + '"]')) {
+                        console.log('Already present script tag for', url);
+                        return url;
+                    }
                     await new Promise((resolve, reject) => {
                         const s = document.createElement('script');
                         s.src = url;
@@ -30,15 +39,19 @@
 
         // تحميل كل مكتبة من مجموعة روابط احتياطية
         async function loadDependencies() {
-            // QRCode.js (qrcodejs 1.0.0) from popular CDNs
+            // المحلي أولاً ثم QRCode.js (qrcodejs 1.0.0) from popular CDNs
             const qrcodeUrls = [
+                './vendor/qrcode.local.js',
+                'vendor/qrcode.local.js',
                 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
                 'https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js',
                 'https://unpkg.com/qrcodejs@1.0.0/qrcode.min.js'
             ];
 
-            // Supabase JS (build) from multiple CDNs
+            // Supabase JS (build) from multiple CDNs, المحلي أولاً
             const supabaseUrls = [
+                './vendor/supabase.local.js',
+                'vendor/supabase.local.js',
                 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/supabase.min.js',
                 'https://unpkg.com/@supabase/supabase-js@2/dist/supabase.min.js',
                 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2'
